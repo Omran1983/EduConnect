@@ -26,17 +26,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Prepare log
+        run: echo "EduConnect Autopilot start $(date -Is)" > ci.log
+
+      # Probe whether this repo is a Node project
+      - name: Probe Node workspace
+        id: probe
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            echo "has_node=1" >> $GITHUB_OUTPUT
+            echo "Found package.json" | tee -a ci.log
+          else
+            echo "has_node=0" >> $GITHUB_OUTPUT
+            echo "No package.json at repo root; skipping Node steps." | tee -a ci.log
+          fi
+
+      - name: Setup Node (only if Node project)
+        if: steps.probe.outputs.has_node == '1'
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: Prepare log
-        run: echo "EduConnect Autopilot start $(date -Is)" > ci.log
-
-      # Install deps, with fallback to legacy-peer-deps
       - name: Install deps (robust)
+        if: steps.probe.outputs.has_node == '1'
         id: install
         shell: bash
         run: |
@@ -44,89 +58,41 @@ jobs:
           (npm ci --omit=optional --no-audit --no-fund || npm i --legacy-peer-deps --omit=optional --no-audit --no-fund) 2>&1 | tee -a ci.log
           echo "rc=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
-      # Remove deprecated --ext for flat ESLint configs, across common packages
+      # Heal ESLint CLI flags if present in scripts
       - name: Heal ESLint flags
+        if: steps.probe.outputs.has_node == '1'
         id: heal_eslint
         shell: bash
         run: |
           set -e
           patched=0
-          find_paths=(
-            .
-            apps apps/* apps/**/*
-            packages packages/* packages/**/*
-            services services/* services/**/*
-            frontend backend web website desktop
-          )
-          for p in "${find_paths[@]}"; do
-            [ -f "$p/package.json" ] || continue
-            if grep -q -- "--ext ts,tsx" "$p/package.json"; then
-              node -e "let f='$p/package.json',fs=require('fs'),j=JSON.parse(fs.readFileSync(f,'utf8')); if(j.scripts){ for(const k of ['lint','lint:fix']) if(j.scripts[k]) j.scripts[k]=j.scripts[k].replace('--ext ts,tsx',''); } fs.writeFileSync(f, JSON.stringify(j,null,2));"
-              patched=1
-            fi
-          done
+          if [ -f package.json ] && grep -q -- "--ext ts,tsx" package.json; then
+            node -e "let fs=require('fs'),j=JSON.parse(fs.readFileSync('package.json','utf8')); if(j.scripts){ for(const k of ['lint','lint:fix']) if(j.scripts[k]) j.scripts[k]=j.scripts[k].replace('--ext ts,tsx',''); } fs.writeFileSync('package.json', JSON.stringify(j,null,2));"
+            git config user.name  "jarvis-bot"
+            git config user.email "ops.aogrl.autopilot@gmail.com"
+            git add package.json && git commit -m "chore(ci): drop --ext for flat ESLint" || true
+            git push || true
+            patched=1
+          fi
           echo "patched=$patched" >> $GITHUB_OUTPUT
 
-      - name: Commit ESLint heal (if patched)
-        if: steps.heal_eslint.outputs.patched == '1'
-        shell: bash
-        run: |
-          git config user.name  "jarvis-bot"
-          git config user.email "ops.aogrl.autopilot@gmail.com"
-          git add -A
-          git commit -m "chore(ci): drop --ext for flat ESLint"
-          git push || true
-
-      # Lint each detected package if scripts exist; never hard-fail on ESLint CLI changes
-      - name: Lint & fix
+      - name: Lint & fix (best-effort)
+        if: steps.probe.outputs.has_node == '1'
         id: lint
         shell: bash
         run: |
           set -o pipefail
           rc=0
-          find_paths=(
-            .
-            apps apps/* apps/**/*
-            packages packages/* packages/**/*
-            services services/* services/**/*
-            frontend backend web website desktop
-          )
-          for p in "${find_paths[@]}"; do
-            [ -f "$p/package.json" ] || continue
-            pushd "$p" >/dev/null
-            if jq -e '.scripts["lint:fix"]' package.json >/dev/null 2>&1; then
-              (npm run lint:fix || true) 2>&1 | tee -a ../ci.log || true
-            fi
-            if jq -e '.scripts["lint"]' package.json >/dev/null 2>&1; then
-              (npm run lint || true) 2>&1 | tee -a ../ci.log || true
-            fi
-            popd >/dev/null
-          done
-          if grep -q "Invalid option '--ext'" ci.log; then
-            echo "Note: ignored deprecated --ext for flat ESLint" | tee -a ci.log
+          if jq -e '.scripts["lint:fix"]' package.json >/dev/null 2>&1; then
+            (npm run lint:fix || true) 2>&1 | tee -a ci.log || true
+          fi
+          if jq -e '.scripts["lint"]' package.json >/dev/null 2>&1; then
+            (npm run lint || true) 2>&1 | tee -a ci.log || true
           fi
           echo "rc=$rc" >> $GITHUB_OUTPUT
 
-      # Align TS/@typescript-eslint only if the warning appears
-      - name: Align TS/@typescript-eslint (on warning)
-        id: heal_ts
-        shell: bash
-        run: |
-          set -eo pipefail
-          if grep -q "not officially supported by @typescript-eslint/typescript-estree" ci.log; then
-            echo "Auto-heal: aligning TS/@typescript-eslint" | tee -a ci.log
-            npm i -D -W typescript@5.5.4 @typescript-eslint/parser@7.18.0 @typescript-eslint/eslint-plugin@7.18.0 @typescript-eslint/typescript-estree@7.18.0 2>&1 | tee -a ci.log
-            git config user.name  "jarvis-bot"
-            git config user.email "ops.aogrl.autopilot@gmail.com"
-            git add package.json package-lock.json || true
-            git commit -m "chore(ci): align TS/@typescript-eslint" || true
-            git push || true
-            echo "patched=1" >> $GITHUB_OUTPUT
-          else
-            echo "patched=0" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Commit fixes if any
+      - name: Commit changes if any
+        if: steps.probe.outputs.has_node == '1'
         id: commit
         shell: bash
         run: |
@@ -149,31 +115,20 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      # Only decide failure if we actually ran Node steps
       - name: Decide result
         id: decide
         shell: bash
         run: |
+          if [ "${{ steps.probe.outputs.has_node }}" != "1" ]; then
+            echo "fail=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           fail=0
           [ "${{ steps.install.outputs.rc }}" != "0" ] && fail=1
           [ "${{ steps.lint.outputs.rc }}"    != "0" ] && fail=1
           [ "${{ steps.commit.outputs.rc }}"  != "0" ] && fail=1
           echo "fail=$fail" >> $GITHUB_OUTPUT
-          echo "SUMMARY: install=${{ steps.install.outputs.rc }} lint=${{ steps.lint.outputs.rc }} commit=${{ steps.commit.outputs.rc }}" | tee -a ci.log
-
-      - name: Auto-close previous ci-failure issues (on success)
-        if: steps.decide.outputs.fail == '0'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner: context.repo.owner, repo: context.repo.repo, labels: 'ci-failure', state: 'open'
-            });
-            for (const i of issues) {
-              await github.rest.issues.update({
-                owner: context.repo.owner, repo: context.repo.repo, issue_number: i.number,
-                state: 'closed', state_reason: 'completed'
-              });
-            }
 
       - name: Create failure issue (with log tail)
         if: steps.decide.outputs.fail == '1'
