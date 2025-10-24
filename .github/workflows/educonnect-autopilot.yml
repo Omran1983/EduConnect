@@ -7,7 +7,7 @@ on:
       - ".github/workflows/**"
       - "!**/*.md"
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
       - name: Prepare log
         run: echo "EduConnect Autopilot start $(date -Is)" > ci.log
 
-      # Robust install with fallback
+      # Install deps, with fallback to legacy-peer-deps
       - name: Install deps (robust)
         id: install
         shell: bash
@@ -44,21 +44,25 @@ jobs:
           (npm ci --omit=optional --no-audit --no-fund || npm i --legacy-peer-deps --omit=optional --no-audit --no-fund) 2>&1 | tee -a ci.log
           echo "rc=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
-      # Heal ESLint flags for flat config (drop --ext)
-      - name: Heal ESLint (--ext) for flat config
+      # Remove deprecated --ext for flat ESLint configs, across common packages
+      - name: Heal ESLint flags
         id: heal_eslint
         shell: bash
         run: |
           set -e
           patched=0
-          # Check common locations for flat config
-          for dir in . apps/web apps/website apps/frontend apps/desktop; do
-            if [ -f "$dir/eslint.config.mjs" ] || [ -f "$dir/eslint.config.js" ]; then
-              pkg="$dir/package.json"
-              if [ -f "$pkg" ] && grep -q -- "--ext ts,tsx" "$pkg"; then
-                node -e "let f='$pkg',fs=require('fs'),j=JSON.parse(fs.readFileSync(f,'utf8')); if(j.scripts){ for(const k of ['lint','lint:fix']) if(j.scripts[k]) j.scripts[k]=j.scripts[k].replace('--ext ts,tsx',''); } fs.writeFileSync(f, JSON.stringify(j,null,2));"
-                patched=1
-              fi
+          find_paths=(
+            .
+            apps apps/* apps/**/*
+            packages packages/* packages/**/*
+            services services/* services/**/*
+            frontend backend web website desktop
+          )
+          for p in "${find_paths[@]}"; do
+            [ -f "$p/package.json" ] || continue
+            if grep -q -- "--ext ts,tsx" "$p/package.json"; then
+              node -e "let f='$p/package.json',fs=require('fs'),j=JSON.parse(fs.readFileSync(f,'utf8')); if(j.scripts){ for(const k of ['lint','lint:fix']) if(j.scripts[k]) j.scripts[k]=j.scripts[k].replace('--ext ts,tsx',''); } fs.writeFileSync(f, JSON.stringify(j,null,2));"
+              patched=1
             fi
           done
           echo "patched=$patched" >> $GITHUB_OUTPUT
@@ -73,26 +77,38 @@ jobs:
           git commit -m "chore(ci): drop --ext for flat ESLint"
           git push || true
 
-      # Lint (try common workspaces & root) and capture rc
+      # Lint each detected package if scripts exist; never hard-fail on ESLint CLI changes
       - name: Lint & fix
         id: lint
         shell: bash
         run: |
           set -o pipefail
           rc=0
-          # Try a few common workspaces (ignore failures)
-          for w in apps/desktop apps/web apps/website apps/frontend . ; do
-            if [ -f "$w/package.json" ]; then
-              (npm run lint:fix -w "$w" || npm run lint:fix --workspace "$w" || true) 2>&1 | tee -a ci.log || true
-              (npm run lint     -w "$w" || npm run lint     --workspace "$w" || true) 2>&1 | tee -a ci.log || true
+          find_paths=(
+            .
+            apps apps/* apps/**/*
+            packages packages/* packages/**/*
+            services services/* services/**/*
+            frontend backend web website desktop
+          )
+          for p in "${find_paths[@]}"; do
+            [ -f "$p/package.json" ] || continue
+            pushd "$p" >/dev/null
+            if jq -e '.scripts["lint:fix"]' package.json >/dev/null 2>&1; then
+              (npm run lint:fix || true) 2>&1 | tee -a ../ci.log || true
             fi
+            if jq -e '.scripts["lint"]' package.json >/dev/null 2>&1; then
+              (npm run lint || true) 2>&1 | tee -a ../ci.log || true
+            fi
+            popd >/dev/null
           done
-          # If any "Invalid option '--ext'" sneaks in, do not fail the job
-          if grep -q "Invalid option '--ext'" ci.log; then echo "Note: --ext ignored for flat config" | tee -a ci.log; fi
+          if grep -q "Invalid option '--ext'" ci.log; then
+            echo "Note: ignored deprecated --ext for flat ESLint" | tee -a ci.log
+          fi
           echo "rc=$rc" >> $GITHUB_OUTPUT
 
-      # Heal TS/@typescript-eslint mismatch if warning detected
-      - name: Heal TS/@typescript-eslint versions (on warning)
+      # Align TS/@typescript-eslint only if the warning appears
+      - name: Align TS/@typescript-eslint (on warning)
         id: heal_ts
         shell: bash
         run: |
@@ -103,14 +119,13 @@ jobs:
             git config user.name  "jarvis-bot"
             git config user.email "ops.aogrl.autopilot@gmail.com"
             git add package.json package-lock.json || true
-            git commit -m "chore(ci): align TS/@typescript-eslint for eslint compatibility" || true
+            git commit -m "chore(ci): align TS/@typescript-eslint" || true
             git push || true
             echo "patched=1" >> $GITHUB_OUTPUT
           else
             echo "patched=0" >> $GITHUB_OUTPUT
           fi
 
-      # Commit any lint fixes produced
       - name: Commit fixes if any
         id: commit
         shell: bash
