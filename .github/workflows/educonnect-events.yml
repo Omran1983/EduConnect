@@ -35,7 +35,6 @@ jobs:
           SHORT_SHA="${SHA:0:7}"
           RUN_URL="$SERVER/$REPO/actions/runs/$RUN_ID"
 
-          # defaults
           TITLE="Event $KIND @ $REPO"
           META=$(jq -n --arg actor "$ACTOR" --arg run "$RUN_URL" '{actor:$actor, run_url:$run}')
 
@@ -66,7 +65,7 @@ jobs:
           echo "Payload:"
           jq . payload.json
 
-      - name: Insert into Supabase (diagnostic)
+      - name: Supabase sanity probe (GET, list tables)
         env:
           SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
@@ -76,12 +75,35 @@ jobs:
             echo "::error ::Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE"
             exit 1
           fi
-
           echo "SUPABASE_URL_OK=$([[ "$SUPABASE_URL" =~ ^https://.+\.supabase\.co$ ]] && echo 1 || echo 0)"
           echo "SERVICE_ROLE_LEN=${#SUPABASE_SERVICE_ROLE}"
 
-          # Send and capture headers, body, and HTTP code
-          curl -sS -D headers.txt -o resp.json -w "%{http_code}" \
+          # Probe with a harmless GET on an existing table using service_role auth.
+          # This should return 200 (or 206) if the key is valid.
+          curl -sS -D headers.txt -o resp_probe.json -w "%{http_code}" \
+            -G "$SUPABASE_URL/rest/v1/project_events" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE" \
+            --data-urlencode "select=id&limit=1" > status_probe.txt
+
+          echo "PROBE_HTTP_STATUS=$(cat status_probe.txt)"
+          echo "PROBE_HEADERS_START"; sed -n '1,120p' headers.txt; echo "PROBE_HEADERS_END"
+          echo "PROBE_RESPONSE_START"; cat resp_probe.json; echo "PROBE_RESPONSE_END"
+
+          code=$(cat status_probe.txt)
+          # 2xx is OK; 401 means wrong key; 404 means table missing
+          if [ "$code" -ge 400 ]; then
+            echo "::error ::Probe failed HTTP $code (401=bad key; 404=table missing)"
+            exit 1
+          fi
+
+      - name: Insert into Supabase (diagnostic)
+        env:
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+        run: |
+          set -e
+          curl -sS -D headers_ins.txt -o resp_ins.json -w "%{http_code}" \
             -X POST "$SUPABASE_URL/rest/v1/project_events" \
             -H "apikey: $SUPABASE_SERVICE_ROLE" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE" \
@@ -89,17 +111,13 @@ jobs:
             -H "Prefer: return=representation" \
             -H "Accept-Profile: public" \
             -H "Content-Profile: public" \
-            --data-binary @payload.json > status.txt
+            --data-binary @payload.json > status_ins.txt
 
-          echo "HTTP_STATUS=$(cat status.txt)"
-          echo "HEADERS_START"
-          sed -n '1,200p' headers.txt
-          echo "HEADERS_END"
-          echo "RESPONSE_START"
-          (jq . resp.json || cat resp.json)
-          echo "RESPONSE_END"
+          echo "HTTP_STATUS=$(cat status_ins.txt)"
+          echo "HEADERS_START"; sed -n '1,200p' headers_ins.txt; echo "HEADERS_END"
+          echo "RESPONSE_START"; (jq . resp_ins.json || cat resp_ins.json); echo "RESPONSE_END"
 
-          code=$(cat status.txt)
+          code=$(cat status_ins.txt)
           if [ "$code" -ge 400 ]; then
             echo "::error ::Supabase returned HTTP $code"
             exit 1
