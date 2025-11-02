@@ -1,3 +1,4 @@
+# .github/workflows/educonnect-events.yml
 name: EduConnect Events to Supabase
 
 on:
@@ -23,52 +24,50 @@ jobs:
           sudo apt-get install -y jq
 
       - name: Build JSON payload
-        env:
-          KIND:   ${{ github.event_name }}
-          REPO:   ${{ github.repository }}
-          ACTOR:  ${{ github.actor }}
-          SERVER: ${{ github.server_url }}
-          RUN_ID: ${{ github.run_id }}
-          SHA:    ${{ github.sha }}
-          REF:    ${{ github.ref }}
-
-          COMMIT_MSG:  ${{ github.event.head_commit.message || '' }}
-          PR_TITLE:    ${{ github.event.pull_request.title || '' }}
-          PR_ACTION:   ${{ github.event.action || '' }}
-          PR_MERGED:   ${{ github.event.pull_request.merged || false }}
-          REL_TAG:     ${{ github.event.release.tag_name || '' }}
-          REL_URL:     ${{ github.event.release.html_url || '' }}
         run: |
           set -e
+          KIND="$GITHUB_EVENT_NAME"
+          REPO="$GITHUB_REPOSITORY"
+          ACTOR="$GITHUB_ACTOR"
+          SERVER="$GITHUB_SERVER_URL"
+          RUN_ID="$GITHUB_RUN_ID"
+          SHA="$GITHUB_SHA"
+          REF="$GITHUB_REF"
           SHORT_SHA="${SHA:0:7}"
           RUN_URL="$SERVER/$REPO/actions/runs/$RUN_ID"
 
           case "$KIND" in
             push)
               BRANCH="${REF#refs/heads/}"
+              COMMIT_MSG="$(jq -r '.head_commit.message // "n/a"' "$GITHUB_EVENT_PATH")"
               TITLE="PUSH $SHORT_SHA @ $REPO:$BRANCH"
-              META=$(jq -n --arg actor "$ACTOR" --arg msg "$COMMIT_MSG" --arg run "$RUN_URL" --arg sha "$SHA" \
-                        '{actor:$actor,message:$msg,run_url:$run,sha:$sha}')
+              META="$(jq -n --arg actor "$ACTOR" --arg msg "$COMMIT_MSG" --arg run "$RUN_URL" --arg sha "$SHA" \
+                       '{actor:$actor,message:$msg,run_url:$run,sha:$sha}')"
               ;;
             pull_request)
+              PR_ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+              PR_TITLE="$(jq -r '.pull_request.title' "$GITHUB_EVENT_PATH")"
+              PR_MERGED="$(jq -r '.pull_request.merged // false' "$GITHUB_EVENT_PATH")"
               TITLE="PR ($PR_ACTION): $PR_TITLE"
-              META=$(jq -n --arg actor "$ACTOR" --arg action "$PR_ACTION" --arg run "$RUN_URL" --argjson merged "$PR_MERGED" \
-                        '{actor:$actor,action:$action,merged:$merged,run_url:$run}')
+              META="$(jq -n --arg actor "$ACTOR" --arg action "$PR_ACTION" --arg run "$RUN_URL" --argjson merged "$PR_MERGED" \
+                       '{actor:$actor,action:$action,merged:$merged,run_url:$run}')"
               ;;
             release)
+              REL_TAG="$(jq -r '.release.tag_name' "$GITHUB_EVENT_PATH")"
+              REL_URL="$(jq -r '.release.html_url' "$GITHUB_EVENT_PATH")"
               TITLE="RELEASE $REL_TAG"
-              META=$(jq -n --arg actor "$ACTOR" --arg url "$REL_URL" --arg run "$RUN_URL" \
-                        '{actor:$actor,url:$url,run_url:$run}')
+              META="$(jq -n --arg actor "$ACTOR" --arg url "$REL_URL" --arg run "$RUN_URL" \
+                       '{actor:$actor,url:$url,run_url:$run}')"
               ;;
             *)
               TITLE="Event $KIND @ $REPO"
-              META=$(jq -n --arg actor "$ACTOR" --arg run "$RUN_URL" \
-                        '{actor:$actor,run_url:$run}')
+              META="$(jq -n --arg actor "$ACTOR" --arg run "$RUN_URL" \
+                       '{actor:$actor,run_url:$run}')"
               ;;
           esac
 
           jq -n --arg source "github" --arg kind "$KIND" --arg title "$TITLE" --argjson meta "$META" \
-                '{source:$source,kind:$kind,title:$title,meta:$meta}' > payload.json
+               '{source:$source,kind:$kind,title:$title,meta:$meta}' > payload.json
 
           echo "Payload:"
           jq . payload.json
@@ -80,8 +79,21 @@ jobs:
         run: |
           set -e
           test -n "$SUPABASE_URL" && test -n "$SUPABASE_SERVICE_ROLE"
-          curl -sS -f -X POST "$SUPABASE_URL/rest/v1/project_events" \
+          # Send and capture response + status (no -f so we can see errors)
+          curl -sS -X POST "$SUPABASE_URL/rest/v1/project_events" \
             -H "apikey: $SUPABASE_SERVICE_ROLE" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE" \
             -H "Content-Type: application/json" \
-            --data-binary @payload.json
+            -H "Prefer: return=representation" \
+            -H "Accept-Profile: public" \
+            -H "Content-Profile: public" \
+            --data-binary @payload.json \
+            -o resp.json -w "%{http_code}" > status.txt
+          echo "HTTP_STATUS=$(cat status.txt)"
+          echo "RESPONSE=$(cat resp.json)"
+          code=$(cat status.txt)
+          # Fail the job only after printing diagnostics
+          if [ "$code" -ge 400 ]; then
+            echo "::error ::Supabase returned HTTP $code"
+            exit 1
+          fi
