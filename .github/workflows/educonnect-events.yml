@@ -1,4 +1,3 @@
-# .github/workflows/educonnect-events.yml
 name: EduConnect Events to Supabase
 
 on:
@@ -36,54 +35,52 @@ jobs:
           SHORT_SHA="${SHA:0:7}"
           RUN_URL="$SERVER/$REPO/actions/runs/$RUN_ID"
 
-          case "$KIND" in
-            push)
-              BRANCH="${REF#refs/heads/}"
-              COMMIT_MSG="$(jq -r '.head_commit.message // "n/a"' "$GITHUB_EVENT_PATH")"
-              TITLE="PUSH $SHORT_SHA @ $REPO:$BRANCH"
-              META="$(jq -n --arg actor "$ACTOR" --arg msg "$COMMIT_MSG" --arg run "$RUN_URL" --arg sha "$SHA" \
-                       '{actor:$actor,message:$msg,run_url:$run,sha:$sha}')"
-              ;;
-            pull_request)
-              PR_ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
-              PR_TITLE="$(jq -r '.pull_request.title' "$GITHUB_EVENT_PATH")"
-              PR_MERGED="$(jq -r '.pull_request.merged // false' "$GITHUB_EVENT_PATH")"
-              TITLE="PR ($PR_ACTION): $PR_TITLE"
-              META="$(jq -n --arg actor "$ACTOR" --arg action "$PR_ACTION" --arg run "$RUN_URL" --argjson merged "$PR_MERGED" \
-                       '{actor:$actor,action:$action,merged:$merged,run_url:$run}')"
-              ;;
-            release)
-              REL_TAG="$(jq -r '.release.tag_name' "$GITHUB_EVENT_PATH")"
-              REL_URL="$(jq -r '.release.html_url' "$GITHUB_EVENT_PATH")"
-              TITLE="RELEASE $REL_TAG"
-              META="$(jq -n --arg actor "$ACTOR" --arg url "$REL_URL" --arg run "$RUN_URL" \
-                       '{actor:$actor,url:$url,run_url:$run}')"
-              ;;
-            *)
-              TITLE="Event $KIND @ $REPO"
-              META="$(jq -n --arg actor "$ACTOR" --arg run "$RUN_URL" \
-                       '{actor:$actor,run_url:$run}')"
-              ;;
-          esac
+          # defaults
+          TITLE="Event $KIND @ $REPO"
+          META=$(jq -n --arg actor "$ACTOR" --arg run "$RUN_URL" '{actor:$actor, run_url:$run}')
+
+          if [ "$KIND" = "push" ]; then
+            BRANCH="${REF#refs/heads/}"
+            COMMIT_MSG="$(jq -r '.head_commit.message // "n/a"' "$GITHUB_EVENT_PATH")"
+            TITLE="PUSH $SHORT_SHA @ $REPO:$BRANCH"
+            META=$(jq -n --arg actor "$ACTOR" --arg msg "$COMMIT_MSG" --arg run "$RUN_URL" --arg sha "$SHA" \
+                   '{actor:$actor, message:$msg, run_url:$run, sha:$sha}')
+          elif [ "$KIND" = "pull_request" ]; then
+            PR_ACTION="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+            PR_TITLE="$(jq -r '.pull_request.title' "$GITHUB_EVENT_PATH")"
+            PR_MERGED="$(jq -r '.pull_request.merged // false' "$GITHUB_EVENT_PATH")"
+            TITLE="PR ($PR_ACTION): $PR_TITLE"
+            META=$(jq -n --arg actor "$ACTOR" --arg action "$PR_ACTION" --arg run "$RUN_URL" --argjson merged "$PR_MERGED" \
+                   '{actor:$actor, action:$action, merged:$merged, run_url:$run}')
+          elif [ "$KIND" = "release" ]; then
+            REL_TAG="$(jq -r '.release.tag_name' "$GITHUB_EVENT_PATH")"
+            REL_URL="$(jq -r '.release.html_url' "$GITHUB_EVENT_PATH")"
+            TITLE="RELEASE $REL_TAG"
+            META=$(jq -n --arg actor "$ACTOR" --arg url "$REL_URL" --arg run "$RUN_URL" \
+                   '{actor:$actor, url:$url, run_url:$run}')
+          fi
 
           jq -n --arg source "github" --arg kind "$KIND" --arg title "$TITLE" --argjson meta "$META" \
-               '{source:$source,kind:$kind,title:$title,meta:$meta}' > payload.json
+             '{source:$source, kind:$kind, title:$title, meta:$meta}' > payload.json
 
           echo "Payload:"
           jq . payload.json
 
-            - name: Insert into Supabase
+      - name: Insert into Supabase (diagnostic)
         env:
           SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
         run: |
           set -e
-          test -n "$SUPABASE_URL" && test -n "$SUPABASE_SERVICE_ROLE"
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE" ]; then
+            echo "::error ::Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE"
+            exit 1
+          fi
 
           echo "SUPABASE_URL_OK=$([[ "$SUPABASE_URL" =~ ^https://.+\.supabase\.co$ ]] && echo 1 || echo 0)"
           echo "SERVICE_ROLE_LEN=${#SUPABASE_SERVICE_ROLE}"
 
-          # Send and capture headers, body, and HTTP code (no -f so we see errors)
+          # Send and capture headers, body, and HTTP code
           curl -sS -D headers.txt -o resp.json -w "%{http_code}" \
             -X POST "$SUPABASE_URL/rest/v1/project_events" \
             -H "apikey: $SUPABASE_SERVICE_ROLE" \
@@ -96,10 +93,10 @@ jobs:
 
           echo "HTTP_STATUS=$(cat status.txt)"
           echo "HEADERS_START"
-          sed -n '1,120p' headers.txt
+          sed -n '1,200p' headers.txt
           echo "HEADERS_END"
           echo "RESPONSE_START"
-          jq . resp.json || cat resp.json || true
+          (jq . resp.json || cat resp.json)
           echo "RESPONSE_END"
 
           code=$(cat status.txt)
