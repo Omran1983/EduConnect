@@ -1,0 +1,56 @@
+name: EduConnect Events → Supabase
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build JSON payload
+        run: |
+          set -e
+          kind="${{ github.event_name }}"
+          repo="${{ github.repository }}"
+          actor="${{ github.actor }}"
+          server="${{ github.server_url }}"
+          run_id="${{ github.run_id }}"
+          json=$(cat <<'JSON'
+{
+  "source": "github",
+  "kind": "__KIND__",
+  "title": "__KIND__ @ __REPO__",
+  "meta": { "actor": "__ACTOR__", "run_url": "__SERVER__/__REPO__/actions/runs/__RUN_ID__" }
+}
+JSON
+)
+          json="${json//__KIND__/$kind}"
+          json="${json//__REPO__/$repo}"
+          json="${json//__ACTOR__/$actor}"
+          json="${json//__SERVER__/$server}"
+          json="${json//__RUN_ID__/$run_id}"
+          printf '%s' "$json" > payload.json
+          sed -n '1,120p' payload.json
+
+      - name: Insert into Supabase
+        env:
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE:  ${{ secrets.SUPABASE_SERVICE_ROLE }}
+        run: |
+          set -e
+          test -n "$SUPABASE_URL" && test -n "$SUPABASE_SERVICE_ROLE"
+          curl -sS -f -X POST "$SUPABASE_URL/rest/v1/project_events" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json
