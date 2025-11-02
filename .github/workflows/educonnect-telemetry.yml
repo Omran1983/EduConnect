@@ -1,84 +1,94 @@
+name: EduConnect Telemetry
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: telemetry-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
   notify-telegram:
-    if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' && github.actor != 'dependabot[bot]' }}
+    # Skip cleanly if secrets are missing
+    if: ${{ secrets.TELEGRAM_BOT_TOKEN && secrets.TELEGRAM_CHAT_ID }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
 
     steps:
-      - name: Build message
-        id: msg
+      - name: Compose message & send to Telegram
         env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
-          REPO: ${{ github.repository }}
-          ACTOR: ${{ github.actor }}
-          SHA: ${{ github.sha }}
-          REF: ${{ github.ref }}
+          REPO:       ${{ github.repository }}
+          ACTOR:      ${{ github.actor }}
+          SHA:        ${{ github.sha }}
+          REF:        ${{ github.ref }}
           SERVER_URL: ${{ github.server_url }}
-          RUN_ID: ${{ github.run_id }}
+          RUN_ID:     ${{ github.run_id }}
+          EVENT_PATH: ${{ github.event_path }}
         run: |
           set -e
           short_sha="${SHA:0:7}"
           url_commit="$SERVER_URL/$REPO/commit/$SHA"
           url_run="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
 
-          case "$EVENT_NAME" in
-            push)
-              branch="${REF#refs/heads/}"
-              title="PUSH → $REPO@$branch"
-              msg="$title
-by: $ACTOR
-commit: $short_sha
-message: ${{ github.event.head_commit.message || 'n/a' }}
-url: $url_commit"
-              ;;
-            pull_request)
-              action="${{ github.event.action }}"
-              number="${{ github.event.number }}"
-              title_pr="${{ github.event.pull_request.title }}"
-              url_pr="${{ github.event.pull_request.html_url }}"
-              merged="${{ github.event.pull_request.merged }}"
-              status="PR #$number ($action)"
-              if [ "$merged" = "true" ] && [ "$action" = "closed" ]; then status="PR #$number (merged)"; fi
-              title="$status → $REPO"
-              msg="$title
-by: $ACTOR
-title: $title_pr
-merged: $merged
-url: $url_pr"
-              ;;
-            release)
-              rel="${{ github.event.release.tag_name }}"
-              title="RELEASE $rel → $REPO"
-              url_rel="${{ github.event.release.html_url }}"
-              msg="$title
-by: $ACTOR
-url: $url_rel"
-              ;;
-            *)
-              title="Event $EVENT_NAME → $REPO"
-              msg="$title
-by: $ACTOR
-url: $url_run"
-              ;;
-          esac
+          # Default message
+          title="Event ${EVENT_NAME} → ${REPO}"
+          msg="$title
+by: ${ACTOR}
+url: ${url_run}"
 
-          # Clamp to be safe under Telegram's 4096 char limit
+          if [ "$EVENT_NAME" = "push" ]; then
+            branch="${REF#refs/heads/}"
+            head_msg=$(jq -r '.head_commit.message // empty' "$EVENT_PATH" 2>/dev/null || true)
+            [ -z "$head_msg" ] && head_msg="n/a"
+            title="PUSH → ${REPO}@${branch}"
+            msg="$title
+by: ${ACTOR}
+commit: ${short_sha}
+message: ${head_msg}
+url: ${url_commit}"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            action=$(jq -r '.action' "$EVENT_PATH")
+            number=$(jq -r '.number' "$EVENT_PATH")
+            title_pr=$(jq -r '.pull_request.title' "$EVENT_PATH")
+            merged=$(jq -r '.pull_request.merged' "$EVENT_PATH")
+            status="PR #${number} (${action})"
+            if [ "$merged" = "true" ] && [ "$action" = "closed" ]; then status="PR #${number} (merged)"; fi
+            url_pr=$(jq -r '.pull_request.html_url' "$EVENT_PATH")
+            title="${status} → ${REPO}"
+            msg="$title
+by: ${ACTOR}
+title: ${title_pr}
+merged: ${merged}
+url: ${url_pr}"
+          elif [ "$EVENT_NAME" = "release" ]; then
+            rel=$(jq -r '.release.tag_name' "$EVENT_PATH")
+            url_rel=$(jq -r '.release.html_url' "$EVENT_PATH")
+            title="RELEASE ${rel} → ${REPO}"
+            msg="$title
+by: ${ACTOR}
+url: ${url_rel}"
+          fi
+
+          # Keep under Telegram's 4096 limit
           printf '%s\n' "$msg" | head -c 3900 > message.txt
-          echo "path=message.txt" >> "$GITHUB_OUTPUT"
 
-      - name: Send to Telegram
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          set -e
-          MSG_PATH="${{ steps.msg.outputs.path }}"
-          curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="$TELEGRAM_CHAT_ID" \
-            --data-urlencode text@"$MSG_PATH" \
-            -o resp.json
-          grep -q '"ok":true' resp.json || (echo "::warning::Telegram API response not ok"; cat resp.json)
+          http=$(curl -sS -o resp.json -w "%{http_code}" -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text@message.txt)
+          echo "HTTP=${http}"
+          cat resp.json
+          grep -q '"ok":true' resp.json
