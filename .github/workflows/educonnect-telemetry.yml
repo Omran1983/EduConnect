@@ -19,76 +19,59 @@ permissions:
 
 jobs:
   notify-telegram:
-    # Skip cleanly if secrets are missing
-    if: ${{ secrets.TELEGRAM_BOT_TOKEN && secrets.TELEGRAM_CHAT_ID }}
+    if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
 
     steps:
-      - name: Compose message & send to Telegram
+      - name: Build & send message (Telegram)
+        uses: actions/github-script@v7
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          EVENT_NAME: ${{ github.event_name }}
-          REPO:       ${{ github.repository }}
-          ACTOR:      ${{ github.actor }}
-          SHA:        ${{ github.sha }}
-          REF:        ${{ github.ref }}
-          SERVER_URL: ${{ github.server_url }}
-          RUN_ID:     ${{ github.run_id }}
-          EVENT_PATH: ${{ github.event_path }}
-        run: |
-          set -e
-          short_sha="${SHA:0:7}"
-          url_commit="$SERVER_URL/$REPO/commit/$SHA"
-          url_run="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
+        with:
+          script: |
+            const eventName = context.eventName;
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+            const actor = context.actor;
+            const sha = context.sha;
+            const ref = context.ref || '';
+            const serverUrl = process.env.GITHUB_SERVER_URL || 'https://github.com';
+            const runId = process.env.GITHUB_RUN_ID || '';
+            const shortSha = (sha || '').substring(0,7);
+            const urlCommit = `${serverUrl}/${repo}/commit/${sha}`;
+            const urlRun = `${serverUrl}/${repo}/actions/runs/${runId}`;
 
-          # Default message
-          title="Event ${EVENT_NAME} → ${REPO}"
-          msg="$title
-by: ${ACTOR}
-url: ${url_run}"
+            let msg = `Event ${eventName} → ${repo}\nby: ${actor}\nurl: ${urlRun}`;
 
-          if [ "$EVENT_NAME" = "push" ]; then
-            branch="${REF#refs/heads/}"
-            head_msg=$(jq -r '.head_commit.message // empty' "$EVENT_PATH" 2>/dev/null || true)
-            [ -z "$head_msg" ] && head_msg="n/a"
-            title="PUSH → ${REPO}@${branch}"
-            msg="$title
-by: ${ACTOR}
-commit: ${short_sha}
-message: ${head_msg}
-url: ${url_commit}"
-          elif [ "$EVENT_NAME" = "pull_request" ]; then
-            action=$(jq -r '.action' "$EVENT_PATH")
-            number=$(jq -r '.number' "$EVENT_PATH")
-            title_pr=$(jq -r '.pull_request.title' "$EVENT_PATH")
-            merged=$(jq -r '.pull_request.merged' "$EVENT_PATH")
-            status="PR #${number} (${action})"
-            if [ "$merged" = "true" ] && [ "$action" = "closed" ]; then status="PR #${number} (merged)"; fi
-            url_pr=$(jq -r '.pull_request.html_url' "$EVENT_PATH")
-            title="${status} → ${REPO}"
-            msg="$title
-by: ${ACTOR}
-title: ${title_pr}
-merged: ${merged}
-url: ${url_pr}"
-          elif [ "$EVENT_NAME" = "release" ]; then
-            rel=$(jq -r '.release.tag_name' "$EVENT_PATH")
-            url_rel=$(jq -r '.release.html_url' "$EVENT_PATH")
-            title="RELEASE ${rel} → ${REPO}"
-            msg="$title
-by: ${ACTOR}
-url: ${url_rel}"
-          fi
+            if (eventName === 'push') {
+              const branch = ref.replace('refs/heads/','');
+              const headMsg = (context.payload.head_commit && context.payload.head_commit.message) || 'n/a';
+              msg = `PUSH → ${repo}@${branch}\nby: ${actor}\ncommit: ${shortSha}\nmessage: ${headMsg}\nurl: ${urlCommit}`;
+            } else if (eventName === 'pull_request') {
+              const action = context.payload.action;
+              const number = context.payload.number;
+              const title = context.payload.pull_request?.title;
+              const merged = context.payload.pull_request?.merged;
+              const url = context.payload.pull_request?.html_url;
+              const status = (merged && action === 'closed') ? `PR #${number} (merged)` : `PR #${number} (${action})`;
+              msg = `${status} → ${repo}\nby: ${actor}\ntitle: ${title}\nmerged: ${merged}\nurl: ${url}`;
+            } else if (eventName === 'release') {
+              const tag = context.payload.release?.tag_name;
+              const url = context.payload.release?.html_url;
+              msg = `RELEASE ${tag} → ${repo}\nby: ${actor}\nurl: ${url}`;
+            }
 
-          # Keep under Telegram's 4096 limit
-          printf '%s\n' "$msg" | head -c 3900 > message.txt
+            if (msg.length > 3900) msg = msg.slice(0, 3900); // Telegram limit buffer
 
-          http=$(curl -sS -o resp.json -w "%{http_code}" -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text@message.txt)
-          echo "HTTP=${http}"
-          cat resp.json
-          grep -q '"ok":true' resp.json
+            const token = process.env.TELEGRAM_BOT_TOKEN;
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+
+            const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({ chat_id: chatId, text: msg })
+            });
+            const body = await resp.json();
+            core.info(`HTTP ${resp.status}: ${JSON.stringify(body)}`);
+            if (!body.ok) core.setFailed('Telegram API error');
