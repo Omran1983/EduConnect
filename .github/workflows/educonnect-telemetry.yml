@@ -1,27 +1,12 @@
-name: EduConnect Telemetry
-
-on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    types: [opened, synchronize, reopened, closed]
-  release:
-    types: [published]
-  workflow_dispatch:
-
-concurrency:
-  group: telemetry-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
   notify-telegram:
-    # Skip cleanly if secrets aren't set
-    if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+    if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' && github.actor != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 3
 
     steps:
       - name: Build message
@@ -56,7 +41,9 @@ url: $url_commit"
               title_pr="${{ github.event.pull_request.title }}"
               url_pr="${{ github.event.pull_request.html_url }}"
               merged="${{ github.event.pull_request.merged }}"
-              title="PR #$number ($action) → $REPO"
+              status="PR #$number ($action)"
+              if [ "$merged" = "true" ] && [ "$action" = "closed" ]; then status="PR #$number (merged)"; fi
+              title="$status → $REPO"
               msg="$title
 by: $ACTOR
 title: $title_pr
@@ -71,12 +58,6 @@ url: $url_pr"
 by: $ACTOR
 url: $url_rel"
               ;;
-            workflow_dispatch)
-              title="Manual trigger → $REPO"
-              msg="$title
-by: $ACTOR
-url: $url_run"
-              ;;
             *)
               title="Event $EVENT_NAME → $REPO"
               msg="$title
@@ -85,7 +66,8 @@ url: $url_run"
               ;;
           esac
 
-          printf '%s\n' "$msg" > message.txt
+          # Clamp to be safe under Telegram's 4096 char limit
+          printf '%s\n' "$msg" | head -c 3900 > message.txt
           echo "path=message.txt" >> "$GITHUB_OUTPUT"
 
       - name: Send to Telegram
@@ -95,7 +77,6 @@ url: $url_run"
         run: |
           set -e
           MSG_PATH="${{ steps.msg.outputs.path }}"
-          # Send; fail on HTTP error; check for "ok":true
           curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="$TELEGRAM_CHAT_ID" \
             --data-urlencode text@"$MSG_PATH" \
