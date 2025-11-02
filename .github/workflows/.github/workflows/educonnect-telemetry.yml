@@ -1,0 +1,103 @@
+name: EduConnect Telemetry
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: telemetry-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  notify-telegram:
+    # Skip cleanly if secrets aren't set
+    if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Build message
+        id: msg
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -e
+          short_sha="${SHA:0:7}"
+          url_commit="$SERVER_URL/$REPO/commit/$SHA"
+          url_run="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
+
+          case "$EVENT_NAME" in
+            push)
+              branch="${REF#refs/heads/}"
+              title="PUSH → $REPO@$branch"
+              msg="$title
+by: $ACTOR
+commit: $short_sha
+message: ${{ github.event.head_commit.message || 'n/a' }}
+url: $url_commit"
+              ;;
+            pull_request)
+              action="${{ github.event.action }}"
+              number="${{ github.event.number }}"
+              title_pr="${{ github.event.pull_request.title }}"
+              url_pr="${{ github.event.pull_request.html_url }}"
+              merged="${{ github.event.pull_request.merged }}"
+              title="PR #$number ($action) → $REPO"
+              msg="$title
+by: $ACTOR
+title: $title_pr
+merged: $merged
+url: $url_pr"
+              ;;
+            release)
+              rel="${{ github.event.release.tag_name }}"
+              title="RELEASE $rel → $REPO"
+              url_rel="${{ github.event.release.html_url }}"
+              msg="$title
+by: $ACTOR
+url: $url_rel"
+              ;;
+            workflow_dispatch)
+              title="Manual trigger → $REPO"
+              msg="$title
+by: $ACTOR
+url: $url_run"
+              ;;
+            *)
+              title="Event $EVENT_NAME → $REPO"
+              msg="$title
+by: $ACTOR
+url: $url_run"
+              ;;
+          esac
+
+          printf '%s\n' "$msg" > message.txt
+          echo "path=message.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -e
+          MSG_PATH="${{ steps.msg.outputs.path }}"
+          # Send; fail on HTTP error; check for "ok":true
+          curl -sS -f -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="$TELEGRAM_CHAT_ID" \
+            --data-urlencode text@"$MSG_PATH" \
+            -o resp.json
+          grep -q '"ok":true' resp.json || (echo "::warning::Telegram API response not ok"; cat resp.json)
