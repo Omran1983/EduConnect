@@ -1,4 +1,4 @@
-name: EduConnect Events → Supabase
+name: EduConnect Events to Supabase
 
 on:
   push:
@@ -17,35 +17,66 @@ jobs:
   log:
     runs-on: ubuntu-latest
     steps:
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
       - name: Build JSON payload
+        env:
+          KIND:   ${{ github.event_name }}
+          REPO:   ${{ github.repository }}
+          ACTOR:  ${{ github.actor }}
+          SERVER: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+          SHA:    ${{ github.sha }}
+          REF:    ${{ github.ref }}
+
+          COMMIT_MSG:  ${{ github.event.head_commit.message || '' }}
+          PR_TITLE:    ${{ github.event.pull_request.title || '' }}
+          PR_ACTION:   ${{ github.event.action || '' }}
+          PR_MERGED:   ${{ github.event.pull_request.merged || false }}
+          REL_TAG:     ${{ github.event.release.tag_name || '' }}
+          REL_URL:     ${{ github.event.release.html_url || '' }}
         run: |
           set -e
-          kind="${{ github.event_name }}"
-          repo="${{ github.repository }}"
-          actor="${{ github.actor }}"
-          server="${{ github.server_url }}"
-          run_id="${{ github.run_id }}"
-          json=$(cat <<'JSON'
-{
-  "source": "github",
-  "kind": "__KIND__",
-  "title": "__KIND__ @ __REPO__",
-  "meta": { "actor": "__ACTOR__", "run_url": "__SERVER__/__REPO__/actions/runs/__RUN_ID__" }
-}
-JSON
-)
-          json="${json//__KIND__/$kind}"
-          json="${json//__REPO__/$repo}"
-          json="${json//__ACTOR__/$actor}"
-          json="${json//__SERVER__/$server}"
-          json="${json//__RUN_ID__/$run_id}"
-          printf '%s' "$json" > payload.json
-          sed -n '1,120p' payload.json
+          SHORT_SHA="${SHA:0:7}"
+          RUN_URL="$SERVER/$REPO/actions/runs/$RUN_ID"
+
+          case "$KIND" in
+            push)
+              BRANCH="${REF#refs/heads/}"
+              TITLE="PUSH $SHORT_SHA @ $REPO:$BRANCH"
+              META=$(jq -n --arg actor "$ACTOR" --arg msg "$COMMIT_MSG" --arg run "$RUN_URL" --arg sha "$SHA" \
+                        '{actor:$actor,message:$msg,run_url:$run,sha:$sha}')
+              ;;
+            pull_request)
+              TITLE="PR ($PR_ACTION): $PR_TITLE"
+              META=$(jq -n --arg actor "$ACTOR" --arg action "$PR_ACTION" --arg run "$RUN_URL" --argjson merged "$PR_MERGED" \
+                        '{actor:$actor,action:$action,merged:$merged,run_url:$run}')
+              ;;
+            release)
+              TITLE="RELEASE $REL_TAG"
+              META=$(jq -n --arg actor "$ACTOR" --arg url "$REL_URL" --arg run "$RUN_URL" \
+                        '{actor:$actor,url:$url,run_url:$run}')
+              ;;
+            *)
+              TITLE="Event $KIND @ $REPO"
+              META=$(jq -n --arg actor "$ACTOR" --arg run "$RUN_URL" \
+                        '{actor:$actor,run_url:$run}')
+              ;;
+          esac
+
+          jq -n --arg source "github" --arg kind "$KIND" --arg title "$TITLE" --argjson meta "$META" \
+                '{source:$source,kind:$kind,title:$title,meta:$meta}' > payload.json
+
+          echo "Payload:"
+          jq . payload.json
 
       - name: Insert into Supabase
         env:
-          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE:  ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
         run: |
           set -e
           test -n "$SUPABASE_URL" && test -n "$SUPABASE_SERVICE_ROLE"
