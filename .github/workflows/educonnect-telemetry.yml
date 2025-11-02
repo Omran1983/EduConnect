@@ -9,33 +9,34 @@ on:
     types: [published]
   workflow_dispatch:
 
-concurrency:
-  group: telemetry-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
   pull-requests: read
+
+concurrency:
+  group: telemetry-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   notify-telegram:
     runs-on: ubuntu-latest
     timeout-minutes: 3
 
-    # Map secrets to env, then use env.* in the condition
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-
-    if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
-
     steps:
       - name: Build & send message (Telegram)
         uses: actions/github-script@v7
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
         with:
           script: |
-            const token = process.env.TELEGRAM_BOT_TOKEN;
-            const chatId = process.env.TELEGRAM_CHAT_ID;
+            const core = require('@actions/core');
+            const token = process.env.TELEGRAM_BOT_TOKEN || '';
+            const chatId = process.env.TELEGRAM_CHAT_ID || '';
+            if (!token || !chatId) {
+              core.notice('Skipping: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set');
+              return;
+            }
 
             const ctx = context;
             const repo = `${ctx.repo.owner}/${ctx.repo.repo}`;
@@ -56,9 +57,9 @@ jobs:
               const headMsg = (ctx.payload.head_commit && ctx.payload.head_commit.message) || 'n/a';
               msg = `PUSH → ${repo}@${branch}\nby: ${actor}\ncommit: ${shortSha}\nmessage: ${headMsg}\nurl: ${urlCommit}`;
             } else if (eventName === 'pull_request') {
+              const pr = ctx.payload.pull_request || {};
               const action = ctx.payload.action;
               const number = ctx.payload.number;
-              const pr = ctx.payload.pull_request || {};
               const status = (pr.merged && action === 'closed') ? `PR #${number} (merged)` : `PR #${number} (${action})`;
               msg = `${status} → ${repo}\nby: ${actor}\ntitle: ${pr.title}\nmerged: ${pr.merged}\nurl: ${pr.html_url}`;
             } else if (eventName === 'release') {
