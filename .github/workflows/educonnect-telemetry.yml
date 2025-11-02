@@ -19,26 +19,33 @@ permissions:
 
 jobs:
   notify-telegram:
-    if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
+
+    # Map secrets to env, then use env.* in the condition
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
 
     steps:
       - name: Build & send message (Telegram)
         uses: actions/github-script@v7
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
         with:
           script: |
-            const eventName = context.eventName;
-            const repo = `${context.repo.owner}/${context.repo.repo}`;
-            const actor = context.actor;
-            const sha = context.sha;
-            const ref = context.ref || '';
-            const serverUrl = process.env.GITHUB_SERVER_URL || 'https://github.com';
+            const token = process.env.TELEGRAM_BOT_TOKEN;
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+
+            const ctx = context;
+            const repo = `${ctx.repo.owner}/${ctx.repo.repo}`;
+            const actor = ctx.actor;
+            const eventName = ctx.eventName;
+            const sha = ctx.sha || '';
+            const ref = ctx.ref || '';
             const runId = process.env.GITHUB_RUN_ID || '';
-            const shortSha = (sha || '').substring(0,7);
+            const serverUrl = process.env.GITHUB_SERVER_URL || 'https://github.com';
+            const shortSha = sha.substring(0,7);
             const urlCommit = `${serverUrl}/${repo}/commit/${sha}`;
             const urlRun = `${serverUrl}/${repo}/actions/runs/${runId}`;
 
@@ -46,26 +53,20 @@ jobs:
 
             if (eventName === 'push') {
               const branch = ref.replace('refs/heads/','');
-              const headMsg = (context.payload.head_commit && context.payload.head_commit.message) || 'n/a';
+              const headMsg = (ctx.payload.head_commit && ctx.payload.head_commit.message) || 'n/a';
               msg = `PUSH → ${repo}@${branch}\nby: ${actor}\ncommit: ${shortSha}\nmessage: ${headMsg}\nurl: ${urlCommit}`;
             } else if (eventName === 'pull_request') {
-              const action = context.payload.action;
-              const number = context.payload.number;
-              const title = context.payload.pull_request?.title;
-              const merged = context.payload.pull_request?.merged;
-              const url = context.payload.pull_request?.html_url;
-              const status = (merged && action === 'closed') ? `PR #${number} (merged)` : `PR #${number} (${action})`;
-              msg = `${status} → ${repo}\nby: ${actor}\ntitle: ${title}\nmerged: ${merged}\nurl: ${url}`;
+              const action = ctx.payload.action;
+              const number = ctx.payload.number;
+              const pr = ctx.payload.pull_request || {};
+              const status = (pr.merged && action === 'closed') ? `PR #${number} (merged)` : `PR #${number} (${action})`;
+              msg = `${status} → ${repo}\nby: ${actor}\ntitle: ${pr.title}\nmerged: ${pr.merged}\nurl: ${pr.html_url}`;
             } else if (eventName === 'release') {
-              const tag = context.payload.release?.tag_name;
-              const url = context.payload.release?.html_url;
-              msg = `RELEASE ${tag} → ${repo}\nby: ${actor}\nurl: ${url}`;
+              const rel = ctx.payload.release || {};
+              msg = `RELEASE ${rel.tag_name} → ${repo}\nby: ${actor}\nurl: ${rel.html_url}`;
             }
 
             if (msg.length > 3900) msg = msg.slice(0, 3900); // Telegram limit buffer
-
-            const token = process.env.TELEGRAM_BOT_TOKEN;
-            const chatId = process.env.TELEGRAM_CHAT_ID;
 
             const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
               method: 'POST',
